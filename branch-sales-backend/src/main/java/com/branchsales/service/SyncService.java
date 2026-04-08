@@ -27,8 +27,7 @@ public class SyncService {
     private final DataSource dataSource;
     private final SyncBatchProcessor batchProcessor;
 
-    @Value("${application.sync.allowed-tables:inventory,products,users}")
-    private String allowedTablesConfig;
+    private final SyncBatchProcessor batchProcessor;
 
     @PostConstruct
     public void init() {
@@ -40,14 +39,8 @@ public class SyncService {
         jdbcTemplate.execute(sql);
     }
 
-    public List<String> getAllowedTables() {
-        return Arrays.asList(allowedTablesConfig.split(","));
-    }
-
     public SyncStatusResponse getSyncStatus(String tableName) {
-        if (!getAllowedTables().contains(tableName)) {
-            throw new IllegalArgumentException("Table not allowed: " + tableName);
-        }
+        validateTable(tableName);
 
         String sql = "SELECT * FROM sync_status WHERE table_name = ?";
         return jdbcTemplate.query(sql, rs -> {
@@ -63,9 +56,7 @@ public class SyncService {
     }
 
     public SyncResponse syncTable(String tableName, List<Map<String, Object>> records) {
-        if (!getAllowedTables().contains(tableName)) {
-            throw new IllegalArgumentException("Table not allowed: " + tableName);
-        }
+        validateTable(tableName);
 
         if (records == null || records.isEmpty()) {
             return SyncResponse.builder().errors(Collections.singletonList("No records provided")).build();
@@ -137,5 +128,23 @@ public class SyncService {
                 "VALUES (?, ?, ?) " +
                 "ON DUPLICATE KEY UPDATE last_sync_timestamp = VALUES(last_sync_timestamp), total_records = VALUES(total_records)";
         jdbcTemplate.update(sql, tableName, LocalDateTime.now(), recordCount);
+    }
+
+    private void validateTable(String tableName) {
+        if (tableName == null || !tableName.matches("^[a-zA-Z0-9_]+$")) {
+            throw new IllegalArgumentException("Invalid table name format: " + tableName);
+        }
+
+        try (Connection conn = dataSource.getConnection()) {
+            String catalog = conn.getCatalog();
+            DatabaseMetaData metaData = conn.getMetaData();
+            try (ResultSet rs = metaData.getTables(catalog, null, tableName, null)) {
+                if (!rs.next()) {
+                    throw new IllegalArgumentException("Table does not exist in the current database: " + tableName);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Error validating table existence: " + tableName, e);
+        }
     }
 }

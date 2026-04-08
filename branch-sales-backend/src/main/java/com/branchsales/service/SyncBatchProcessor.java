@@ -29,14 +29,18 @@ public class SyncBatchProcessor {
                 tableName, colNames, placeholders, updatePart
         );
 
-        int[] results = jdbcTemplate.batchUpdate(sql, batch, batch.size(), (ps, record) -> {
+        int[][] results = jdbcTemplate.batchUpdate(sql, batch, batch.size(), (ps, record) -> {
             for (int i = 0; i < columns.size(); i++) {
                 ps.setObject(i + 1, record.get(columns.get(i)));
             }
         });
 
         int affected = 0;
-        for (int r : results) affected += (r > 0 ? 1 : 0);
+        for (int[] row : results) {
+            for (int r : row) {
+                if (r > 0 || r == -2) affected++; // -2 means Success but unknown affected count for some JDBC drivers
+            }
+        }
         return affected;
     }
 }
