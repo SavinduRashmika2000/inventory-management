@@ -27,8 +27,6 @@ public class SyncService {
     private final DataSource dataSource;
     private final SyncBatchProcessor batchProcessor;
 
-    private final SyncBatchProcessor batchProcessor;
-
     @PostConstruct
     public void init() {
         String sql = "CREATE TABLE IF NOT EXISTS sync_status (" +
