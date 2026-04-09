@@ -17,7 +17,18 @@ public class SyncBatchProcessor {
     private final JdbcTemplate jdbcTemplate;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public int executeUpsertBatch(String tableName, List<Map<String, Object>> batch, List<String> columns) {
+    public int executeUpsertBatch(String tableName, List<Map<String, Object>> batch, List<String> schemaColumns) {
+        if (batch.isEmpty()) return 0;
+
+        // Use only columns that exist in the schema and are present in the first record
+        // (assumes all records in a batch have the same set of keys)
+        java.util.Set<String> schemaSet = new java.util.HashSet<>(schemaColumns);
+        List<String> columns = batch.get(0).keySet().stream()
+                .filter(schemaSet::contains)
+                .collect(Collectors.toList());
+
+        if (columns.isEmpty()) return 0;
+
         String colNames = String.join(", ", columns);
         String placeholders = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
         String updatePart = columns.stream()
@@ -38,7 +49,7 @@ public class SyncBatchProcessor {
         int affected = 0;
         for (int[] row : results) {
             for (int r : row) {
-                if (r > 0 || r == -2) affected++; // -2 means Success but unknown affected count for some JDBC drivers
+                if (r > 0 || r == -2) affected++;
             }
         }
         return affected;

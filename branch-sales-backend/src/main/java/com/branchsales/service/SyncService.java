@@ -106,16 +106,13 @@ public class SyncService {
 
         for (int i = 0; i < records.size(); i++) {
             Map<String, Object> record = records.get(i);
-            Set<String> recordKeys = record.keySet();
-
-            if (!schemaSet.equals(recordKeys)) {
-                List<String> missing = schemaColumns.stream().filter(c -> !recordKeys.contains(c)).collect(Collectors.toList());
-                List<String> extra = recordKeys.stream().filter(k -> !schemaSet.contains(k)).collect(Collectors.toList());
-                
-                String error = "Record index " + i + " has mismatching fields. ";
-                if (!missing.isEmpty()) error += "Missing: " + missing + ". ";
-                if (!extra.isEmpty()) error += "Extra: " + extra + ". ";
-                errors.add(error);
+            // Only reject records that have columns NOT in the schema (extra/unknown columns).
+            // Missing columns are perfectly fine — partial updates are supported.
+            List<String> extra = record.keySet().stream()
+                    .filter(k -> !schemaSet.contains(k))
+                    .collect(Collectors.toList());
+            if (!extra.isEmpty()) {
+                errors.add("Record index " + i + " contains unknown columns not in table schema: " + extra);
             }
         }
         return errors;
