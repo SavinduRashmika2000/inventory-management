@@ -45,6 +45,24 @@ public class SyncBatchProcessor {
                 ps.setObject(i + 1, record.get(columns.get(i)));
             }
         });
+        int affected = 0;
+        for (int[] row : results) {
+            for (int r : row) {
+                if (r > 0 || r == -2) affected++;
+            }
+        }
+        return affected;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int executeDeleteBatch(String tableName, String pkColumn, List<Object> ids) {
+        if (ids.isEmpty()) return 0;
+
+        String sql = String.format("DELETE FROM %s WHERE %s = ?", tableName, pkColumn);
+
+        int[][] results = jdbcTemplate.batchUpdate(sql, ids, ids.size(), (ps, id) -> {
+            ps.setObject(1, id);
+        });
 
         int affected = 0;
         for (int[] row : results) {

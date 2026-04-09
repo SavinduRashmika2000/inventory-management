@@ -80,24 +80,50 @@ public class SyncService {
         updateSyncStatus(tableName, records.size());
 
         return SyncResponse.builder()
-                .insertedCount(totalInsertedOrUpdated) // MySQL returns 1 for insert and 2 for update in some cases, so this is an aggregate
-                .updatedCount(0) // We can't easily distinguish without more parsing
+                .insertedCount(totalInsertedOrUpdated)
+                .updatedCount(0)
                 .build();
     }
 
-    private List<String> getTableColumns(String tableName) {
-        List<String> columns = new ArrayList<>();
-        try (Connection conn = dataSource.getConnection()) {
-            DatabaseMetaData metaData = conn.getMetaData();
-            try (ResultSet rs = metaData.getColumns(null, null, tableName, null)) {
-                while (rs.next()) {
-                    columns.add(rs.getString("COLUMN_NAME"));
-                }
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Failed to fetch metadata for table: " + tableName, e);
+    public SyncResponse deleteRecords(String tableName, List<Object> ids) {
+        validateTable(tableName);
+
+        if (ids == null || ids.isEmpty()) {
+            return SyncResponse.builder().errors(Collections.singletonList("No IDs provided")).build();
         }
-        return columns;
+
+        String pkColumn = getPrimaryKeyColumn(tableName);
+        if (pkColumn == null) {
+            return SyncResponse.builder().errors(Collections.singletonList("Could not identify primary key for table: " + tableName)).build();
+        }
+
+        int batchSize = 500;
+        int totalDeleted = 0;
+
+        for (int i = 0; i < ids.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, ids.size());
+            List<Object> batch = ids.subList(i, end);
+            totalDeleted += batchProcessor.executeDeleteBatch(tableName, pkColumn, batch);
+        }
+
+        return SyncResponse.builder()
+                .updatedCount(totalDeleted) // Using updatedCount to represent deletions
+                .build();
+    }
+
+    private String getPrimaryKeyColumn(String tableName) {
+        String sql = "SHOW KEYS FROM " + tableName + " WHERE Key_name = 'PRIMARY'";
+        return jdbcTemplate.query(sql, rs -> {
+            if (rs.next()) {
+                return rs.getString("Column_name");
+            }
+            return null;
+        });
+    }
+
+    private List<String> getTableColumns(String tableName) {
+        String sql = "DESCRIBE " + tableName;
+        return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getString("Field"));
     }
 
     private List<String> validateRecords(List<Map<String, Object>> records, List<String> schemaColumns) {
@@ -130,16 +156,12 @@ public class SyncService {
             throw new IllegalArgumentException("Invalid table name format: " + tableName);
         }
 
-        try (Connection conn = dataSource.getConnection()) {
-            String catalog = conn.getCatalog();
-            DatabaseMetaData metaData = conn.getMetaData();
-            try (ResultSet rs = metaData.getTables(catalog, null, tableName, null)) {
-                if (!rs.next()) {
-                    throw new IllegalArgumentException("Table does not exist in the current database: " + tableName);
-                }
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Error validating table existence: " + tableName, e);
+        // Use a direct query for validation (more reliable than Metadata API in some environments)
+        String sql = "SHOW TABLES LIKE ?";
+        List<String> tables = jdbcTemplate.query(sql, (rs, rowNum) -> rs.getString(1), tableName);
+        
+        if (tables.isEmpty()) {
+            throw new IllegalArgumentException("Table does not exist in the database: " + tableName);
         }
     }
 }

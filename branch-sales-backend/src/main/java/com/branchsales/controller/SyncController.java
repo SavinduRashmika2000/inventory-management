@@ -33,7 +33,29 @@ public class SyncController {
             return ResponseEntity.badRequest().body(SyncResponse.builder()
                     .errors(List.of(e.getMessage()))
                     .build());
-        } catch (Exception e) {
+        } catch (Exception e) { e.printStackTrace();
+            return ResponseEntity.internalServerError().body(SyncResponse.builder()
+                    .errors(List.of("Internal server error: " + e.getMessage()))
+                    .build());
+        }
+    }
+
+    @DeleteMapping("/{tableName}")
+    public ResponseEntity<SyncResponse> deleteRecords(
+            @PathVariable String tableName,
+            @RequestBody List<Object> ids
+    ) {
+        try {
+            SyncResponse response = syncService.deleteRecords(tableName, ids);
+            if (response.getErrors() != null && !response.getErrors().isEmpty()) {
+                return ResponseEntity.badRequest().body(response);
+            }
+            return ResponseEntity.ok(response);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(SyncResponse.builder()
+                    .errors(List.of(e.getMessage()))
+                    .build());
+        } catch (Exception e) { e.printStackTrace();
             return ResponseEntity.internalServerError().body(SyncResponse.builder()
                     .errors(List.of("Internal server error: " + e.getMessage()))
                     .build());
@@ -50,7 +72,7 @@ public class SyncController {
             return ResponseEntity.ok(status);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
+        } catch (Exception e) { e.printStackTrace();
             return ResponseEntity.internalServerError().build();
         }
     }
