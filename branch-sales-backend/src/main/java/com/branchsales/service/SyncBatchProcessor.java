@@ -43,7 +43,7 @@ public class SyncBatchProcessor {
                 parseBatchResults(updateCounts, result);
             } catch (DataAccessException e) {
                 log.warn("Batch update failed for table {}, falling back to row-by-row: {}", tableName, e.getMessage());
-                processRowByRow(sql, groupRecords, startIndex, result);
+                processRowByRow(sql, columns, groupRecords, startIndex, result);
             }
         }
         return result;
@@ -74,14 +74,14 @@ public class SyncBatchProcessor {
         return result;
     }
 
-    private void processRowByRow(String sql, List<Map<String, Object>> records, int globalStartIndex, BatchSyncResult result) {
+    private void processRowByRow(String sql, Set<String> columns, List<Map<String, Object>> records, int globalStartIndex, BatchSyncResult result) {
         for (int i = 0; i < records.size(); i++) {
             Map<String, Object> record = records.get(i);
             try {
-                Object[] args = record.values().toArray();
+                Object[] args = columns.stream().map(record::get).toArray();
                 int count = jdbcTemplate.update(sql, args);
-                // MySQL: 1=inserted, 2=updated, 0=no change (handle as update)
-                if (count == 1) result.setInsertedCount(result.getInsertedCount() + 1);
+                // MySQL: 1=inserted, 2=updated, 0=no change, <0=SUCCESS_NO_INFO
+                if (count == 1 || count < 0) result.setInsertedCount(result.getInsertedCount() + 1);
                 else result.setUpdatedCount(result.getUpdatedCount() + 1);
             } catch (Exception e) {
                 result.getErrors().add(new SyncError(globalStartIndex + i, "Row processing failed: " + e.getMessage()));
@@ -91,7 +91,7 @@ public class SyncBatchProcessor {
 
     private void parseBatchResults(int[] updateCounts, BatchSyncResult result) {
         for (int count : updateCounts) {
-            if (count == 1) result.setInsertedCount(result.getInsertedCount() + 1);
+            if (count == 1 || count < 0) result.setInsertedCount(result.getInsertedCount() + 1);
             else if (count == 2 || count == 0) result.setUpdatedCount(result.getUpdatedCount() + 1);
         }
     }
@@ -104,6 +104,10 @@ public class SyncBatchProcessor {
                 .filter(c -> !c.equalsIgnoreCase(pkColumn))
                 .map(c -> c + " = VALUES(" + c + ")")
                 .collect(Collectors.joining(", "));
+
+        if (updateClause.isEmpty()) {
+            updateClause = pkColumn + " = VALUES(" + pkColumn + ")";
+        }
 
         return String.format("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
                 tableName, cols, placeholders, updateClause);
