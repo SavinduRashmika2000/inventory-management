@@ -1,20 +1,10 @@
 package com.branchsales.service;
 
-import lombok.RequiredArgsConstructor;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
-
-import java.util.List;
-import java.util.Map;
 import com.branchsales.dto.BatchSyncResult;
 import com.branchsales.dto.SyncError;
-import com.branchsales.dto.SyncResponse;
-import com.branchsales.dto.SyncStatusResponse;
-import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -25,9 +15,6 @@ import java.sql.SQLException;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 @Service
 @RequiredArgsConstructor
 public class SyncBatchProcessor {
@@ -36,58 +23,27 @@ public class SyncBatchProcessor {
     private final JdbcTemplate jdbcTemplate;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public BatchSyncResult executeUpsertBatch(String tableName, List<Map<String, Object>> batch, String pkColumn, int startIndex) {
+    public BatchSyncResult executeUpsertBatch(String tableName, List<Map<String, Object>> records, String pkColumn, int startIndex) {
         BatchSyncResult result = new BatchSyncResult();
-        if (batch.isEmpty()) return result;
+        
+        Map<Set<String>, List<Map<String, Object>>> groups = records.stream()
+                .collect(Collectors.groupingBy(Map::keySet));
 
-        // Group records by their set of keys (Partial Update partitions)
-        Map<Set<String>, List<Map<String, Object>>> partitions = new LinkedHashMap<>();
-        for (Map<String, Object> record : batch) {
-            partitions.computeIfAbsent(new HashSet<>(record.keySet()), k -> new ArrayList<>()).add(record);
-        }
-
-        int currentBatchOffset = 0;
-        for (Map.Entry<Set<String>, List<Map<String, Object>>> entry : partitions.entrySet()) {
-            Set<String> keys = entry.getKey();
-            List<Map<String, Object>> subBatch = entry.getValue();
+        for (Map.Entry<Set<String>, List<Map<String, Object>>> entry : groups.entrySet()) {
+            Set<String> columns = entry.getKey();
+            List<Map<String, Object>> groupRecords = entry.getValue();
             
+            String sql = buildUpsertSql(tableName, columns, pkColumn);
+            List<Object[]> batchArgs = groupRecords.stream()
+                    .map(r -> columns.stream().map(r::get).toArray())
+                    .collect(Collectors.toList());
+
             try {
-                result.add(processSubBatch(tableName, subBatch, keys, pkColumn));
-            } catch (Exception e) {
-                log.warn("Batch failed for table {}, falling back to row-by-row: {}", tableName, e.getMessage());
-                result.add(processRowByRow(tableName, subBatch, keys, pkColumn, startIndex + currentBatchOffset));
-            }
-            currentBatchOffset += subBatch.size();
-        }
-
-        return result;
-    }
-
-    private BatchSyncResult processSubBatch(String tableName, List<Map<String, Object>> subBatch, Set<String> keys, String pkColumn) {
-        List<String> columns = new ArrayList<>(keys);
-        String sql = buildUpsertSql(tableName, columns, pkColumn);
-
-        int[][] results = jdbcTemplate.batchUpdate(sql, subBatch, subBatch.size(), (ps, record) -> {
-            for (int i = 0; i < columns.size(); i++) {
-                ps.setObject(i + 1, record.get(columns.get(i)));
-            }
-        });
-
-        return parseBatchResults(results, false);
-    }
-
-    private BatchSyncResult processRowByRow(String tableName, List<Map<String, Object>> subBatch, Set<String> keys, String pkColumn, int startIndex) {
-        BatchSyncResult result = new BatchSyncResult();
-        List<String> columns = new ArrayList<>(keys);
-        String sql = buildUpsertSql(tableName, columns, pkColumn);
-
-        for (int i = 0; i < subBatch.size(); i++) {
-            Map<String, Object> record = subBatch.get(i);
-            try {
-                int rowResult = jdbcTemplate.update(sql, columns.stream().map(record::get).toArray());
-                result.add(parseSingleResult(rowResult, false));
+                int[] updateCounts = jdbcTemplate.batchUpdate(sql, batchArgs);
+                parseBatchResults(updateCounts, result);
             } catch (DataAccessException e) {
-                result.getErrors().add(new SyncError(startIndex + i, e.getRootCause() != null ? e.getRootCause().getMessage() : e.getMessage()));
+                log.warn("Batch update failed for table {}, falling back to row-by-row: {}", tableName, e.getMessage());
+                processRowByRow(sql, groupRecords, startIndex, result);
             }
         }
         return result;
@@ -95,66 +51,61 @@ public class SyncBatchProcessor {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public BatchSyncResult executeDeleteBatch(String tableName, String pkColumn, List<Object> ids, int startIndex) {
+        String sql = "DELETE FROM " + tableName + " WHERE " + pkColumn + " = ?";
         BatchSyncResult result = new BatchSyncResult();
-        if (ids.isEmpty()) return result;
-
-        String sql = String.format("DELETE FROM %s WHERE %s = ?", tableName, pkColumn);
-
+        
         try {
-            int[][] results = jdbcTemplate.batchUpdate(sql, ids, ids.size(), (ps, id) -> {
-                ps.setObject(1, id);
-            });
-            result.add(parseBatchResults(results, true));
-        } catch (Exception e) {
-            log.warn("Delete batch failed for table {}, falling back to row-by-row", tableName);
+            List<Object[]> batchArgs = ids.stream().map(id -> new Object[]{id}).collect(Collectors.toList());
+            int[] deleteCounts = jdbcTemplate.batchUpdate(sql, batchArgs);
+            for (int count : deleteCounts) {
+                result.setDeletedCount(result.getDeletedCount() + (count > 0 ? 1 : 0));
+            }
+        } catch (DataAccessException e) {
+            log.warn("Delete batch failed for table {}, falling back to row-by-row: {}", tableName, e.getMessage());
             for (int i = 0; i < ids.size(); i++) {
                 try {
-                    int rows = jdbcTemplate.update(sql, ids.get(i));
-                    result.setDeletedCount(result.getDeletedCount() + rows);
-                } catch (DataAccessException ex) {
-                    result.getErrors().add(new SyncError(startIndex + i, ex.getMessage()));
+                    int count = jdbcTemplate.update(sql, ids.get(i));
+                    result.setDeletedCount(result.getDeletedCount() + (count > 0 ? 1 : 0));
+                } catch (Exception ex) {
+                    result.getErrors().add(new SyncError(startIndex + i, "Delete failed: " + ex.getMessage()));
                 }
             }
         }
-
         return result;
     }
 
-    private String buildUpsertSql(String tableName, List<String> columns, String pkColumn) {
-        String colNames = String.join(", ", columns);
+    private void processRowByRow(String sql, List<Map<String, Object>> records, int globalStartIndex, BatchSyncResult result) {
+        for (int i = 0; i < records.size(); i++) {
+            Map<String, Object> record = records.get(i);
+            try {
+                Object[] args = record.values().toArray();
+                int count = jdbcTemplate.update(sql, args);
+                // MySQL: 1=inserted, 2=updated, 0=no change (handle as update)
+                if (count == 1) result.setInsertedCount(result.getInsertedCount() + 1);
+                else result.setUpdatedCount(result.getUpdatedCount() + 1);
+            } catch (Exception e) {
+                result.getErrors().add(new SyncError(globalStartIndex + i, "Row processing failed: " + e.getMessage()));
+            }
+        }
+    }
+
+    private void parseBatchResults(int[] updateCounts, BatchSyncResult result) {
+        for (int count : updateCounts) {
+            if (count == 1) result.setInsertedCount(result.getInsertedCount() + 1);
+            else if (count == 2 || count == 0) result.setUpdatedCount(result.getUpdatedCount() + 1);
+        }
+    }
+
+    private String buildUpsertSql(String tableName, Set<String> columns, String pkColumn) {
+        String cols = String.join(", ", columns);
         String placeholders = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
-        String updatePart = columns.stream()
-                .filter(c -> !c.equalsIgnoreCase(pkColumn)) // Exclude PK from update clause
+        
+        String updateClause = columns.stream()
+                .filter(c -> !c.equalsIgnoreCase(pkColumn))
                 .map(c -> c + " = VALUES(" + c + ")")
                 .collect(Collectors.joining(", "));
 
-        return String.format(
-                "INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
-                tableName, colNames, placeholders, updatePart
-        );
-    }
-
-    private BatchSyncResult parseBatchResults(int[][] results, boolean isDelete) {
-        BatchSyncResult batchResult = new BatchSyncResult();
-        for (int[] group : results) {
-            for (int r : group) {
-                batchResult.add(parseSingleResult(r, isDelete));
-            }
-        }
-        return batchResult;
-    }
-
-    private BatchSyncResult parseSingleResult(int r, boolean isDelete) {
-        BatchSyncResult result = new BatchSyncResult();
-        if (isDelete) {
-            if (r > 0 || r == -2) result.setDeletedCount(1);
-        } else {
-            if (r == 1) {
-                result.setInsertedCount(1);
-            } else if (r == 2 || r == 0 || r == -2) {
-                result.setUpdatedCount(1);
-            }
-        }
-        return result;
+        return String.format("INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
+                tableName, cols, placeholders, updateClause);
     }
 }

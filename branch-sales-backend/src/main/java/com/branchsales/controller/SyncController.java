@@ -4,7 +4,6 @@ import com.branchsales.dto.SyncError;
 import com.branchsales.dto.SyncResponse;
 import com.branchsales.dto.SyncStatusResponse;
 import com.branchsales.service.SyncService;
-import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,11 +12,14 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/sync")
-@RequiredArgsConstructor
 @CrossOrigin(origins = "*")
 public class SyncController {
 
     private final SyncService syncService;
+
+    public SyncController(SyncService syncService) {
+        this.syncService = syncService;
+    }
 
     @PostMapping("/{tableName}")
     public ResponseEntity<SyncResponse> syncTable(
@@ -34,7 +36,7 @@ public class SyncController {
             return ResponseEntity.badRequest().body(SyncResponse.builder()
                     .errors(List.of(new SyncError(-1, e.getMessage())))
                     .build());
-        } catch (Exception e) { e.printStackTrace();
+        } catch (Exception e) {
             return ResponseEntity.internalServerError().body(SyncResponse.builder()
                     .errors(List.of(new SyncError(-1, "Internal server error: " + e.getMessage())))
                     .build());
@@ -56,7 +58,7 @@ public class SyncController {
             return ResponseEntity.badRequest().body(SyncResponse.builder()
                     .errors(List.of(new SyncError(-1, e.getMessage())))
                     .build());
-        } catch (Exception e) { e.printStackTrace();
+        } catch (Exception e) {
             return ResponseEntity.internalServerError().body(SyncResponse.builder()
                     .errors(List.of(new SyncError(-1, "Internal server error: " + e.getMessage())))
                     .build());
@@ -73,7 +75,7 @@ public class SyncController {
             return ResponseEntity.ok(status);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().build();
-        } catch (Exception e) { e.printStackTrace();
+        } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
     }
