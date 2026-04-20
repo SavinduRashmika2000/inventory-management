@@ -1,14 +1,15 @@
 package com.branchsales.service;
 
+import com.branchsales.dto.BatchSyncResult;
+import com.branchsales.dto.SyncError;
 import com.branchsales.dto.SyncResponse;
 import com.branchsales.dto.SyncStatusResponse;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -22,6 +23,7 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 public class SyncService {
+    private static final Logger log = LoggerFactory.getLogger(SyncService.class);
 
     private final JdbcTemplate jdbcTemplate;
     private final DataSource dataSource;
@@ -57,31 +59,47 @@ public class SyncService {
         validateTable(tableName);
 
         if (records == null || records.isEmpty()) {
-            return SyncResponse.builder().errors(Collections.singletonList("No records provided")).build();
+            return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "No records provided"))).build();
         }
 
-        List<String> columns = getTableColumns(tableName);
-        List<String> errors = validateRecords(records, columns);
-
-        if (!errors.isEmpty()) {
-            return SyncResponse.builder().errors(errors).build();
+        String pkColumn = getPrimaryKeyColumn(tableName);
+        if (pkColumn == null) {
+            return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "Could not identify primary key for table"))).build();
         }
 
-        // Batch processing in chunks of 500
-        int batchSize = 500;
-        int totalInsertedOrUpdated = 0;
-
-        for (int i = 0; i < records.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, records.size());
-            List<Map<String, Object>> batch = records.subList(i, end);
-            totalInsertedOrUpdated += batchProcessor.executeUpsertBatch(tableName, batch, columns);
+        Set<String> schemaColumns = new HashSet<>(getTableColumns(tableName));
+        
+        List<SyncError> businessErrors = new ArrayList<>();
+        List<Map<String, Object>> validRecords = new ArrayList<>();
+        
+        for (int i = 0; i < records.size(); i++) {
+            Map<String, Object> record = records.get(i);
+            String error = validateRecord(record, schemaColumns, pkColumn);
+            if (error != null) {
+                businessErrors.add(new SyncError(i, error));
+            } else {
+                validRecords.add(record);
+            }
         }
 
-        updateSyncStatus(tableName, records.size());
+        BatchSyncResult finalResult = new BatchSyncResult();
+        finalResult.setErrors(businessErrors);
+
+        if (!validRecords.isEmpty()) {
+            int batchSize = 500;
+            for (int i = 0; i < validRecords.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, validRecords.size());
+                List<Map<String, Object>> batch = validRecords.subList(i, end);
+                finalResult.add(batchProcessor.executeUpsertBatch(tableName, batch, pkColumn, i));
+            }
+        }
+
+        updateSyncStatus(tableName, validRecords.size());
 
         return SyncResponse.builder()
-                .insertedCount(totalInsertedOrUpdated)
-                .updatedCount(0)
+                .insertedCount(finalResult.getInsertedCount())
+                .updatedCount(finalResult.getUpdatedCount())
+                .errors(finalResult.getErrors())
                 .build();
     }
 
@@ -89,36 +107,39 @@ public class SyncService {
         validateTable(tableName);
 
         if (ids == null || ids.isEmpty()) {
-            return SyncResponse.builder().errors(Collections.singletonList("No IDs provided")).build();
+            return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "No IDs provided"))).build();
         }
 
         String pkColumn = getPrimaryKeyColumn(tableName);
         if (pkColumn == null) {
-            return SyncResponse.builder().errors(Collections.singletonList("Could not identify primary key for table: " + tableName)).build();
+             return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "Could not identify primary key"))).build();
         }
 
+        BatchSyncResult finalResult = new BatchSyncResult();
         int batchSize = 500;
-        int totalDeleted = 0;
-
         for (int i = 0; i < ids.size(); i += batchSize) {
             int end = Math.min(i + batchSize, ids.size());
-            List<Object> batch = ids.subList(i, end);
-            totalDeleted += batchProcessor.executeDeleteBatch(tableName, pkColumn, batch);
+            finalResult.add(batchProcessor.executeDeleteBatch(tableName, pkColumn, ids.subList(i, end), i));
         }
 
         return SyncResponse.builder()
-                .updatedCount(totalDeleted) // Using updatedCount to represent deletions
+                .deletedCount(finalResult.getDeletedCount())
+                .errors(finalResult.getErrors())
                 .build();
     }
 
     private String getPrimaryKeyColumn(String tableName) {
-        String sql = "SHOW KEYS FROM " + tableName + " WHERE Key_name = 'PRIMARY'";
-        return jdbcTemplate.query(sql, rs -> {
-            if (rs.next()) {
-                return rs.getString("Column_name");
+        try (Connection conn = dataSource.getConnection()) {
+            DatabaseMetaData metaData = conn.getMetaData();
+            try (ResultSet rs = metaData.getPrimaryKeys(null, null, tableName)) {
+                if (rs.next()) {
+                    return rs.getString("COLUMN_NAME");
+                }
             }
-            return null;
-        });
+        } catch (SQLException e) {
+            log.error("Error fetching PK for table {}: {}", tableName, e.getMessage());
+        }
+        return null;
     }
 
     private List<String> getTableColumns(String tableName) {
@@ -126,22 +147,20 @@ public class SyncService {
         return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getString("Field"));
     }
 
-    private List<String> validateRecords(List<Map<String, Object>> records, List<String> schemaColumns) {
-        List<String> errors = new ArrayList<>();
-        Set<String> schemaSet = new HashSet<>(schemaColumns);
-
-        for (int i = 0; i < records.size(); i++) {
-            Map<String, Object> record = records.get(i);
-            // Only reject records that have columns NOT in the schema (extra/unknown columns).
-            // Missing columns are perfectly fine — partial updates are supported.
-            List<String> extra = record.keySet().stream()
-                    .filter(k -> !schemaSet.contains(k))
-                    .collect(Collectors.toList());
-            if (!extra.isEmpty()) {
-                errors.add("Record index " + i + " contains unknown columns not in table schema: " + extra);
-            }
+    private String validateRecord(Map<String, Object> record, Set<String> schemaColumns, String pkColumn) {
+        if (!record.containsKey(pkColumn)) {
+            return "Missing mandatory primary key: " + pkColumn;
         }
-        return errors;
+        
+        List<String> unknown = record.keySet().stream()
+                .filter(k -> !schemaColumns.contains(k))
+                .collect(Collectors.toList());
+        
+        if (!unknown.isEmpty()) {
+            return "Unknown columns: " + unknown;
+        }
+        
+        return null;
     }
 
     private void updateSyncStatus(String tableName, int recordCount) {
@@ -153,15 +172,13 @@ public class SyncService {
 
     private void validateTable(String tableName) {
         if (tableName == null || !tableName.matches("^[a-zA-Z0-9_]+$")) {
-            throw new IllegalArgumentException("Invalid table name format: " + tableName);
+            throw new IllegalArgumentException("Invalid table name format");
         }
 
-        // Use a direct query for validation (more reliable than Metadata API in some environments)
         String sql = "SHOW TABLES LIKE ?";
         List<String> tables = jdbcTemplate.query(sql, (rs, rowNum) -> rs.getString(1), tableName);
-        
         if (tables.isEmpty()) {
-            throw new IllegalArgumentException("Table does not exist in the database: " + tableName);
+            throw new IllegalArgumentException("Table does not exist: " + tableName);
         }
     }
 }

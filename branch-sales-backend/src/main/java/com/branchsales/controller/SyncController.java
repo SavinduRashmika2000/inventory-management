@@ -1,5 +1,6 @@
 package com.branchsales.controller;
 
+import com.branchsales.dto.SyncError;
 import com.branchsales.dto.SyncResponse;
 import com.branchsales.dto.SyncStatusResponse;
 import com.branchsales.service.SyncService;
@@ -31,11 +32,11 @@ public class SyncController {
             return ResponseEntity.ok(response);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(SyncResponse.builder()
-                    .errors(List.of(e.getMessage()))
+                    .errors(List.of(new SyncError(-1, e.getMessage())))
                     .build());
         } catch (Exception e) { e.printStackTrace();
             return ResponseEntity.internalServerError().body(SyncResponse.builder()
-                    .errors(List.of("Internal server error: " + e.getMessage()))
+                    .errors(List.of(new SyncError(-1, "Internal server error: " + e.getMessage())))
                     .build());
         }
     }
@@ -53,11 +54,11 @@ public class SyncController {
             return ResponseEntity.ok(response);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(SyncResponse.builder()
-                    .errors(List.of(e.getMessage()))
+                    .errors(List.of(new SyncError(-1, e.getMessage())))
                     .build());
         } catch (Exception e) { e.printStackTrace();
             return ResponseEntity.internalServerError().body(SyncResponse.builder()
-                    .errors(List.of("Internal server error: " + e.getMessage()))
+                    .errors(List.of(new SyncError(-1, "Internal server error: " + e.getMessage())))
                     .build());
         }
     }
