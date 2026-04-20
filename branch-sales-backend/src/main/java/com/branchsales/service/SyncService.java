@@ -31,12 +31,27 @@ public class SyncService {
 
     @PostConstruct
     public void init() {
-        String sql = "CREATE TABLE IF NOT EXISTS sync_status (" +
+        String statusSql = "CREATE TABLE IF NOT EXISTS sync_status (" +
                 "table_name VARCHAR(255) PRIMARY KEY, " +
                 "last_sync_timestamp DATETIME, " +
                 "total_records INT" +
                 ")";
-        jdbcTemplate.execute(sql);
+        jdbcTemplate.execute(statusSql);
+
+        String auditSql = "CREATE TABLE IF NOT EXISTS sync_audit_log (" +
+                "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
+                "table_name VARCHAR(255), " +
+                "branch_id VARCHAR(50), " +
+                "record_count INT, " +
+                "inserted_count INT, " +
+                "updated_count INT, " +
+                "deleted_count INT, " +
+                "error_count INT, " +
+                "duration_ms BIGINT, " +
+                "status VARCHAR(50), " +
+                "timestamp DATETIME" +
+                ")";
+        jdbcTemplate.execute(auditSql);
     }
 
     public SyncStatusResponse getSyncStatus(String tableName) {
@@ -55,8 +70,9 @@ public class SyncService {
         }, tableName);
     }
 
-    public SyncResponse syncTable(String tableName, List<Map<String, Object>> records) {
+    public SyncResponse syncTable(String tableName, String branchId, List<Map<String, Object>> records) {
         validateTable(tableName);
+        long startTime = System.currentTimeMillis();
 
         if (records == null || records.isEmpty()) {
             return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "No records provided"))).build();
@@ -64,22 +80,18 @@ public class SyncService {
 
         String pkColumn = getPrimaryKeyColumn(tableName);
         if (pkColumn == null) {
-            return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "Could not identify primary key for table"))).build();
+            return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "Could not identify primary key for table " + tableName))).build();
         }
 
         Set<String> schemaColumns = new HashSet<>(getTableColumns(tableName));
-        
         List<SyncError> businessErrors = new ArrayList<>();
         List<Map<String, Object>> validRecords = new ArrayList<>();
         
         for (int i = 0; i < records.size(); i++) {
             Map<String, Object> record = records.get(i);
             String error = validateRecord(record, schemaColumns, pkColumn);
-            if (error != null) {
-                businessErrors.add(new SyncError(i, error));
-            } else {
-                validRecords.add(record);
-            }
+            if (error != null) businessErrors.add(new SyncError(i, error));
+            else validRecords.add(record);
         }
 
         BatchSyncResult finalResult = new BatchSyncResult();
@@ -89,22 +101,25 @@ public class SyncService {
             int batchSize = 500;
             for (int i = 0; i < validRecords.size(); i += batchSize) {
                 int end = Math.min(i + batchSize, validRecords.size());
-                List<Map<String, Object>> batch = validRecords.subList(i, end);
-                finalResult.add(batchProcessor.executeUpsertBatch(tableName, batch, pkColumn, i));
+                finalResult.add(batchProcessor.executeUpsertBatch(tableName, validRecords.subList(i, end), pkColumn, i));
             }
         }
 
+        long duration = System.currentTimeMillis() - startTime;
         updateSyncStatus(tableName, validRecords.size());
+        logAudit(tableName, branchId, records.size(), finalResult, duration, "UPSERT");
 
         return SyncResponse.builder()
                 .insertedCount(finalResult.getInsertedCount())
                 .updatedCount(finalResult.getUpdatedCount())
+                .durationMs(duration)
                 .errors(finalResult.getErrors())
                 .build();
     }
 
-    public SyncResponse deleteRecords(String tableName, List<Object> ids) {
+    public SyncResponse deleteRecords(String tableName, String branchId, List<Object> ids) {
         validateTable(tableName);
+        long startTime = System.currentTimeMillis();
 
         if (ids == null || ids.isEmpty()) {
             return SyncResponse.builder().errors(Collections.singletonList(new SyncError(-1, "No IDs provided"))).build();
@@ -122,10 +137,26 @@ public class SyncService {
             finalResult.add(batchProcessor.executeDeleteBatch(tableName, pkColumn, ids.subList(i, end), i));
         }
 
+        long duration = System.currentTimeMillis() - startTime;
+        logAudit(tableName, branchId, ids.size(), finalResult, duration, "DELETE");
+
         return SyncResponse.builder()
                 .deletedCount(finalResult.getDeletedCount())
+                .durationMs(duration)
                 .errors(finalResult.getErrors())
                 .build();
+    }
+
+    private void logAudit(String tableName, String branchId, int totalRequested, BatchSyncResult result, long duration, String type) {
+        String status = result.getErrors().isEmpty() ? "SUCCESS" : 
+                        (result.getErrors().size() < totalRequested ? "PARTIAL_SUCCESS" : "FAILED");
+        
+        String sql = "INSERT INTO sync_audit_log (table_name, branch_id, record_count, inserted_count, updated_count, deleted_count, error_count, duration_ms, status, timestamp) " +
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        jdbcTemplate.update(sql, tableName, branchId, totalRequested, 
+                            result.getInsertedCount(), result.getUpdatedCount(), result.getDeletedCount(), 
+                            result.getErrors().size(), duration, status, LocalDateTime.now());
     }
 
     private String getPrimaryKeyColumn(String tableName) {

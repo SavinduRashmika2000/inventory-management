@@ -80,13 +80,21 @@ public class SyncBatchProcessor {
             try {
                 Object[] args = columns.stream().map(record::get).toArray();
                 int count = jdbcTemplate.update(sql, args);
-                // MySQL: 1=inserted, 2=updated, 0=no change, <0=SUCCESS_NO_INFO
                 if (count == 1 || count < 0) result.setInsertedCount(result.getInsertedCount() + 1);
                 else result.setUpdatedCount(result.getUpdatedCount() + 1);
-            } catch (Exception e) {
-                result.getErrors().add(new SyncError(globalStartIndex + i, "Row processing failed: " + e.getMessage()));
+            } catch (DataAccessException e) {
+                String errorMsg = classifyError(e);
+                result.getErrors().add(new SyncError(globalStartIndex + i, errorMsg));
             }
         }
+    }
+
+    private String classifyError(DataAccessException e) {
+        String message = e.getMostSpecificCause().getMessage();
+        if (message.contains("Duplicate entry")) return "Data Conflict: Primary Key already exists with incompatible data.";
+        if (message.contains("Data truncation") || message.contains("too long")) return "Validation Error: Field value too long or incompatible type.";
+        if (message.contains("Cannot add or update a child row")) return "Integrity Error: Foreign key constraint failed.";
+        return "Database Error: " + message;
     }
 
     private void parseBatchResults(int[] updateCounts, BatchSyncResult result) {

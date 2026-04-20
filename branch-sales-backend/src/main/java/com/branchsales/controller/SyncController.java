@@ -24,10 +24,11 @@ public class SyncController {
     @PostMapping("/{tableName}")
     public ResponseEntity<SyncResponse> syncTable(
             @PathVariable String tableName,
+            @RequestHeader(value = "X-Branch-ID", required = false) String branchId,
             @RequestBody List<Map<String, Object>> records
     ) {
         try {
-            SyncResponse response = syncService.syncTable(tableName, records);
+            SyncResponse response = syncService.syncTable(tableName, branchId, records);
             if (response.getErrors() != null && !response.getErrors().isEmpty()) {
                 return ResponseEntity.badRequest().body(response);
             }
@@ -46,10 +47,11 @@ public class SyncController {
     @DeleteMapping("/{tableName}")
     public ResponseEntity<SyncResponse> deleteRecords(
             @PathVariable String tableName,
+            @RequestHeader(value = "X-Branch-ID", required = false) String branchId,
             @RequestBody List<Object> ids
     ) {
         try {
-            SyncResponse response = syncService.deleteRecords(tableName, ids);
+            SyncResponse response = syncService.deleteRecords(tableName, branchId, ids);
             if (response.getErrors() != null && !response.getErrors().isEmpty()) {
                 return ResponseEntity.badRequest().body(response);
             }
